@@ -7,7 +7,8 @@ import OrbitLine from './OrbitLine.js';
 import SunManager from './SunManager.js';
 import GUIManager from './GUIManager.js';
 import DashboardUI from './DashboardUI.js';
-import { planetData, specialDistances, SunState, M_SUN, SPIN_MULTIPLIER } from './constants.js';
+import EclipseManager from './EclipseManager.js';
+import { G, planetData, specialDistances, SunState, M_SUN, SPIN_MULTIPLIER, moonData } from './constants.js';
 
 export default class App {
     constructor(domContainer = document.body) {
@@ -26,11 +27,12 @@ export default class App {
         this.lamps = [];
         this.clock = new THREE.Clock();
         this.SunMassDisplay = SunState.mass.toExponential(3);
+
+        this.moonState = null;           // will hold { bodyIndex, parentIndex, r, theta, n }
+        this.MOON_EXTRA_FACTOR = 26;
     }
 
-    // init: load background, create sun, create planets, finalize
     async init() {
-        // background
         try {
             const bg = await this.assetLoader.loadTexture('/space.jpg');
             bg.mapping = THREE.EquirectangularReflectionMapping;
@@ -101,7 +103,92 @@ export default class App {
                 const mat = new THREE.MeshStandardMaterial({ map: tx, roughness: 0.7, metalness: 0 });
                 const mesh = new THREE.Mesh(geo, mat);
                 this.sceneMgr.scene.add(mesh);
+                if (d.name === 'saturn' && d.hasRings) {
+                    try {
+                        // تحميل القوام الرئيسي للحلقات
+                        const ringTex = await this.assetLoader.safeLoad(d.ringTexture);
 
+                        // إنشاء حلقة مخصصة بإحداثيات UV دائرية
+                        const innerRadius = d.innerRadius * d.scale * planetVisualScale;
+                        const outerRadius = d.outerRadius * d.scale * planetVisualScale;
+                        const segments = 128; // زيادة الدقة للحصول على شكل دائري أفضل
+
+                        // إنشاء geometry مخصص للحلقات بدلاً من RingGeometry القياسي
+                        const ringGeometry = new THREE.BufferGeometry();
+
+                        const vertices = [];
+                        const uvs = [];
+                        const indices = [];
+
+                        // إنشاء vertices وUVs للحلقة
+                        for (let i = 0; i <= segments; i++) {
+                            const angle = (i / segments) * Math.PI * 2;
+                            const cos = Math.cos(angle);
+                            const sin = Math.sin(angle);
+
+                            // Vertex للحافة الداخلية
+                            vertices.push(cos * innerRadius, 0, sin * innerRadius);
+                            uvs.push(0, i / segments);
+
+                            // Vertex للحافة الخارجية
+                            vertices.push(cos * outerRadius, 0, sin * outerRadius);
+                            uvs.push(1, i / segments);
+                        }
+
+                        // إنشاء indices للمثلثات
+                        for (let i = 0; i < segments; i++) {
+                            const i2 = i * 2;
+
+                            // المثلث الأول
+                            indices.push(i2, i2 + 1, i2 + 2);
+
+                            // المثلث الثاني
+                            indices.push(i2 + 2, i2 + 1, i2 + 3);
+                        }
+
+                        // إضافة البيانات إلى geometry
+                        ringGeometry.setIndex(indices);
+                        ringGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                        ringGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+                        ringGeometry.computeVertexNormals();
+
+                        // استخدام MeshPhongMaterial للحصول على مظهر أكثر واقعية
+                        const ringMaterial = new THREE.MeshPhongMaterial({
+                            map: ringTex,
+                            side: THREE.DoubleSide,
+                            transparent: true,
+                            opacity: 0.8,
+                            alphaTest: 0.5,
+                            emissive: 0x888888,
+                            specular: 0x222222
+                        });
+
+                        const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                        //  ringMesh.rotation.x = Math.PI / 2;
+
+                        mesh.add(ringMesh);
+
+                        console.log('Saturn rings created successfully with circular texture mapping');
+                    } catch (err) {
+                        console.error('Failed to load ring texture for Saturn', err);
+                        const ringGeometry = new THREE.RingGeometry(
+                            d.innerRadius * d.scale * planetVisualScale,
+                            d.outerRadius * d.scale * planetVisualScale,
+                            64
+                        );
+
+                        const ringMaterial = new THREE.MeshBasicMaterial({
+                            color: 0xFFFFFF,
+                            side: THREE.DoubleSide,
+                            transparent: true,
+                            opacity: 0.3
+                        });
+
+                        const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                        //ringMesh.rotation.x = Math.PI / 2;
+                        mesh.add(ringMesh);
+                    }
+                }
                 const theta0 = index * 0.6;
                 const a_m = d.realdistance * 1000;
                 const r_m = a_m * (1 - d.e * d.e) / (1 + d.e * Math.cos(theta0));
@@ -132,11 +219,9 @@ export default class App {
                 body.areal_count = 1;
                 body.areal_mean = areal0;
 
-                // add to physics bodies (sun at index 0 remains)
                 this.physics.addBody(body);
                 const bodyIndex = this.physics.bodies.length - 1;
 
-                // create orbitline and set userData mapping
                 const orbit = new OrbitLine({ a_m, e: d.e, metersPerUnit: this.metersPerUnit });
                 const lineObj = orbit.getObject3D();
                 lineObj.userData = { planetIndex: bodyIndex };
@@ -149,6 +234,77 @@ export default class App {
 
         // wait for all to finish
         await Promise.all(loadPromises);
+
+        // find earth body dynamically (avoid hard-coded index)
+        const earthIndexInBodies = this.physics.bodies.findIndex(b => b.name === 'earth');
+        const earthBody = earthIndexInBodies >= 0 ? this.physics.bodies[earthIndexInBodies] : null;
+
+        if (earthBody) {
+            try {
+                const moonTex = await this.assetLoader.safeLoad(moonData.texture);
+                const moonVisualScale = 2;
+                const geo = new THREE.SphereGeometry(moonData.scale * moonVisualScale, 48, 48);
+                const mat = new THREE.MeshStandardMaterial({
+                    map: moonTex,
+                    roughness: 0.7,
+                    metalness: 0
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+
+                // For stability we force the moon onto a circular orbit around Earth at fixed radius
+                const theta0 = 0;
+                const r_m = moonData.realdistance * this.MOON_EXTRA_FACTOR; // fixed radius (m)
+
+                // Relative position around Earth (initial)
+                const x = r_m * Math.cos(theta0);
+                const z = r_m * Math.sin(theta0);
+                const moonPosRel = new THREE.Vector3(x, 0, z);
+                const pos_m = moonPosRel.clone().add(earthBody.position_m);
+
+                // Circular-orbit speed magnitude around Earth: v = sqrt(G * M_earth / r)
+                const v_circ = Math.sqrt(Math.max(0, G * earthBody.mass / r_m));
+                let tang = new THREE.Vector3(-Math.sin(theta0), 0, Math.cos(theta0)).normalize();
+                if (new THREE.Vector3().crossVectors(moonPosRel, tang).y < 0) tang.negate();
+                const vel_rel = tang.multiplyScalar(v_circ);
+                const vel_m = vel_rel.clone().add(earthBody.velocity_m);
+
+                const body = new Body({
+                    name: moonData.name,
+                    mesh,
+                    mass: moonData.mass,
+                    position_m: pos_m,
+                    velocity_m: vel_m,
+                    a_m: r_m, // store radius in a_m for reference
+                    e: 0,     // we force circular behavior for stability
+                    included: true
+                });
+
+                this.physics.addBody(body);
+
+                const moonLight = new THREE.PointLight(0xffffff, 1, 100);
+                mesh.add(moonLight);
+
+                // add mesh to scene (we'll control its position from physics.body.position_m)
+                this.sceneMgr.scene.add(mesh);
+
+                // store moonState: fixed radius circular orbit around Earth
+                const n = Math.sqrt(G * earthBody.mass / (r_m * r_m * r_m)); // mean motion for circular orbit
+                this.moonState = {
+                    bodyIndex: this.physics.bodies.length - 1,
+                    parentIndex: earthIndexInBodies,
+                    r: r_m,
+                    theta: theta0,
+                    n // rad/s
+                };
+
+                console.log('Moon created and linked to Earth at radius (m):', r_m, 'moonBodyIndex:', this.moonState.bodyIndex);
+
+            } catch (err) {
+                console.error('Failed to load moon texture', err);
+            }
+        } else {
+            console.error('Earth body not found for moon creation');
+        }
     }
 
     _finalizeAfterLoads() {
@@ -157,7 +313,8 @@ export default class App {
             const b = this.physics.bodies[i];
             if (b.mesh) b.mesh.position.copy(b.position_m.clone().divideScalar(this.metersPerUnit));
         }
-
+        this.eclipseManager = new EclipseManager({ scene: this.sceneMgr.scene, app: this });
+        this.eclipseManager.update();
         // remove COM motion (included bodies only)
         this.physics.removeCenterOfMassVelocity();
 
@@ -207,6 +364,33 @@ export default class App {
             body.areal_M2 = 0;
 
             if (body.mesh) body.mesh.position.copy(body.position_m.clone().divideScalar(metersPerUnit));
+        }
+
+        // re-initialize moonState absolute position & velocity around Earth (if exists)
+        if (this.moonState) {
+            const ms = this.moonState;
+            const moonBody = this.physics.bodies[ms.bodyIndex];
+            const earthBody = this.physics.bodies[ms.parentIndex];
+            if (moonBody && earthBody) {
+                ms.theta = 0; // reset phase
+                const r = ms.r;
+                const x = r * Math.cos(ms.theta);
+                const z = r * Math.sin(ms.theta);
+                const rel = new THREE.Vector3(x, 0, z);
+                const pos_m = rel.clone().add(earthBody.position_m);
+                moonBody.position_m.copy(pos_m);
+
+                // circular speed v = n * r
+                const v_mag = ms.n * r;
+                let tang = new THREE.Vector3(-Math.sin(ms.theta), 0, Math.cos(ms.theta)).normalize();
+                if (new THREE.Vector3().crossVectors(rel, tang).y < 0) tang.negate();
+                const vel_rel = tang.multiplyScalar(v_mag);
+                moonBody.velocity_m.copy(vel_rel.clone().add(earthBody.velocity_m));
+
+                moonBody.accel_m.set(0, 0, 0);
+
+                if (moonBody.mesh) moonBody.mesh.position.copy(moonBody.position_m.clone().divideScalar(metersPerUnit));
+            }
         }
 
         this.physics.removeCenterOfMassVelocity();
@@ -302,6 +486,38 @@ export default class App {
         const dtSim = deltaReal * params.timeScale;
         if (!params.pause && dtSim > 0) {
             this.physics.step(dtSim, params);
+
+            // --- keep moon strictly linked to Earth's center at fixed radius ---
+            if (this.moonState && dtSim > 0) {
+                const ms = this.moonState;
+                const moonBody = this.physics.bodies[ms.bodyIndex];
+                const earthBody = this.physics.bodies[ms.parentIndex];
+                if (moonBody && earthBody) {
+                    // advance phase by mean motion * dt
+                    ms.theta += ms.n * dtSim;
+
+                    // relative vector at fixed radius r
+                    const r = ms.r;
+                    const x = r * Math.cos(ms.theta);
+                    const z = r * Math.sin(ms.theta);
+                    const rel = new THREE.Vector3(x, 0, z);
+
+                    // update absolute position and velocity
+                    const newPos = rel.clone().add(earthBody.position_m);
+                    moonBody.position_m.copy(newPos);
+
+                    // circular tangential speed v = n * r (direction is tangential)
+                    const v_rel_mag = ms.n * r;
+                    let tang = new THREE.Vector3(-Math.sin(ms.theta), 0, Math.cos(ms.theta)).normalize();
+                    if (new THREE.Vector3().crossVectors(rel, tang).y < 0) tang.negate();
+                    const vel_rel = tang.multiplyScalar(v_rel_mag);
+                    const vel_abs = vel_rel.clone().add(earthBody.velocity_m);
+                    moonBody.velocity_m.copy(vel_abs);
+
+                    // reset accel to avoid weird transients (physics will recompute)
+                    moonBody.accel_m.set(0, 0, 0);
+                }
+            }
         }
 
         // update mesh positions
@@ -310,6 +526,7 @@ export default class App {
             const b = this.physics.bodies[i];
             if (b.mesh) b.mesh.position.copy(b.position_m.clone().divideScalar(mpu));
         }
+        if (this.eclipseManager) this.eclipseManager.update();
 
         // spin rotation for planets
         if (!params.pause && dtSim > 0) {
@@ -325,10 +542,13 @@ export default class App {
                 b.mesh.rotation.y += spin * dtSim;
             }
         }
-
+        if (this.sunMesh) {
+            this.sunMesh.rotation.y += 0.01 * deltaReal;
+        }
         // update UI and render
         this.dashboard.update(this.physics.bodies, this.metersPerUnit, params);
         this.sceneMgr.controls.update();
         this.sceneMgr.render();
     }
+
 }

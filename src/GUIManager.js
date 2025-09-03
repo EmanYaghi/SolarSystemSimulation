@@ -20,7 +20,7 @@ export default class GUIManager {
             softening: 1e6,
             pause: false,
             checkKepler: true,
-            maxSubstepSeconds: 3600,
+            maxSubstepSeconds: 1000,
             reset: () => this.app.resetSystem(),
             sunMass: SunState.mass,
             recomputeSpeeds: true,
