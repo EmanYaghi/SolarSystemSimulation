@@ -11,6 +11,7 @@ import EclipseManager from './EclipseManager.js';
 import { G, planetData, specialDistances, SunState, M_SUN, SPIN_MULTIPLIER, moonData } from './constants.js';
 
 export default class App {
+
     constructor(domContainer = document.body) {
         this.container = domContainer;
         this.sceneMgr = new SceneManager(domContainer);

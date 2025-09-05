@@ -11,6 +11,10 @@ export default class EclipseManager {
         this.earthShadow = null;  // disk on earth
         this.indicator = null;    // sprite indicator
 
+        // مواد ومتغيرات إضافية للتحكم بإضاءة القمر
+        this.originalMoonMaterials = null; // لتخزين المواد الأصلية للقمر
+        this.originalMoonOpacity = null; // لتخزين قيمة opacity الأصلية
+
         // materials (re-used)
         this.shadowMat = new THREE.MeshBasicMaterial({
             color: 0x000000,
@@ -21,6 +25,8 @@ export default class EclipseManager {
         });
 
         this.initDone = false;
+        this.lastLunarState = false; // لتتبع حالة الكسوف السابقة
+        this.lunarEclipseIntensity = 0; // شدة الكسوف (0 - 1)
     }
 
     makeIndicatorTexture(text) {
@@ -87,6 +93,78 @@ export default class EclipseManager {
         return { t, perp, closest };
     }
 
+    // دالة جديدة لتخفيف إضاءة القمر أثناء الكسوف
+    _dimMoonLight(moonMesh, isLunarEclipse, umbraFactor) {
+        if (!moonMesh) return;
+
+        // حساب شدة الكسوف بناءً على مدى دخول القمر في ظل الأرض
+        // umbraFactor يتراوح بين 0 (خارج الظل) و 1 (في منتصف الظل)
+        const targetIntensity = isLunarEclipse ? 1 - umbraFactor : 0;
+
+        // تطبيق تغيير تدريجي لشدة الكسوف
+        this.lunarEclipseIntensity += (targetIntensity - this.lunarEclipseIntensity) * 0.1;
+
+        // إذا كانت حالة الكسوف لم تتغير بشكل كبير، لا تفعل شيئاً
+        if (isLunarEclipse === this.lastLunarState && Math.abs(this.lunarEclipseIntensity - targetIntensity) < 0.01) return;
+
+        if (isLunarEclipse) {
+            // حفظ المواد الأصلية للقمر إذا كانت هذه المرة الأولى
+            if (!this.originalMoonMaterials) {
+                this.originalMoonMaterials = moonMesh.material.clone();
+                this.originalMoonOpacity = moonMesh.material.opacity;
+
+                // إذا كان القمر يحتوي على حلقات، نحتاج إلى معالجتها أيضاً
+                if (moonMesh.children && moonMesh.children.length > 0) {
+                    this.originalMoonChildrenMaterials = [];
+                    moonMesh.children.forEach((child, index) => {
+                        this.originalMoonChildrenMaterials[index] = child.material.clone();
+                    });
+                }
+            }
+
+            // تخفيف إضاءة القمر بناءً على شدة الكسوف
+            const darkness = 0.9 * this.lunarEclipseIntensity; // 90% أقصى تخفيف
+            moonMesh.material.opacity = Math.max(0.1, this.originalMoonOpacity - darkness);
+            moonMesh.material.needsUpdate = true;
+
+            // تطبيق نفس التعتيم على الأطفال إذا كانوا موجودين
+            if (moonMesh.children && this.originalMoonChildrenMaterials) {
+                moonMesh.children.forEach((child, index) => {
+                    if (this.originalMoonChildrenMaterials[index]) {
+                        child.material.opacity = Math.max(0.1, this.originalMoonChildrenMaterials[index].opacity - darkness);
+                        child.material.needsUpdate = true;
+                    }
+                });
+            }
+        } else {
+            // استعادة الإضاءة الأصلية للقمر
+            if (this.originalMoonMaterials) {
+                moonMesh.material.opacity = this.originalMoonOpacity;
+                moonMesh.material.needsUpdate = true;
+
+                // استعادة إضاءة الأطفال إذا كانت موجودة
+                if (moonMesh.children && this.originalMoonChildrenMaterials) {
+                    moonMesh.children.forEach((child, index) => {
+                        if (this.originalMoonChildrenMaterials[index]) {
+                            child.material.opacity = this.originalMoonChildrenMaterials[index].opacity;
+                            child.material.needsUpdate = true;
+                        }
+                    });
+                }
+
+                // إذا انتهى الكسوف تماماً، مسح البيانات المحفوظة
+                if (this.lunarEclipseIntensity < 0.01) {
+                    this.originalMoonMaterials = null;
+                    this.originalMoonOpacity = null;
+                    this.originalMoonChildrenMaterials = null;
+                }
+            }
+        }
+
+        // تحديث حالة الكسوف السابقة
+        this.lastLunarState = isLunarEclipse;
+    }
+
     update() {
         if (!this.enabled) return;
         this._ensureMeshes();
@@ -133,13 +211,20 @@ export default class EclipseManager {
         const projEarthOnSE = this._axisProjectionInfo(S, u_se, E);
 
         let lunar = false;
+        let umbraFactor = 0; // عامل يحدد مدى دخول القمر في ظل الأرض
         const margin = 0.01; // small margin
+
         // moon must be further along axis than earth (behind earth relative to sun)
         if (projMoonOnSE.t > projEarthOnSE.t + margin) {
             // perpendicular distance of moon from Sun->Earth axis must be less than Earth radius (approx umbra)
             // use factor to tighten threshold (umbra smaller than Earth radius because of Sun size, but we approximate)
-            const umbraFactor = 0.95;
-            if (projMoonOnSE.perp < R_e * umbraFactor) lunar = true;
+            const maxUmbraFactor = 0.95;
+            if (projMoonOnSE.perp < R_e * maxUmbraFactor) {
+                lunar = true;
+                // حساب مدى دخول القمر في ظل الأرض (0 إلى 1)
+                umbraFactor = 1 - (projMoonOnSE.perp / (R_e * maxUmbraFactor));
+                umbraFactor = Math.max(0, Math.min(1, umbraFactor)); // التأكد من أن القيمة بين 0 و 1
+            }
         }
 
         // ---- check SOLAR ECLIPSE: Moon between Sun and Earth ----
@@ -169,6 +254,9 @@ export default class EclipseManager {
             }
         }
 
+        // تطبيق تخفيف الإضاءة على القمر أثناء الكسوف القمري
+        this._dimMoonLight(moonMesh, lunar, umbraFactor);
+
         // ---- update visuals ----
         // default hide
         this.moonShadow.visible = false;
@@ -176,23 +264,8 @@ export default class EclipseManager {
         this.indicator.visible = false;
 
         if (lunar) {
-            // place a dark circle on the moon surface facing the sun
-            // center point: on moon surface toward sun
-            const dirMoonToSun = S.clone().sub(M).normalize(); // points from moon -> sun
-            const center = M.clone().add(dirMoonToSun.clone().multiplyScalar(R_m + 0.0001));
-            // approximate disk radius: r ≈ R_m * (R_e / d_em)
-            const d_em = M.clone().distanceTo(E);
-            const r_disk = Math.max(0.0005, R_m * (R_e / Math.max(0.0001, d_em)));
-
-            this.moonShadow.position.copy(center);
-            // orient disk normal to face the sun (so it lies tangent to sphere)
-            // we want disk plane normal to be towards sun (so circle appears as dark cap facing sun)
-            const normal = dirMoonToSun.clone().negate(); // from center toward moon interior / roughly toward moon center
-            const q = new THREE.Quaternion();
-            q.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal.normalize());
-            this.moonShadow.quaternion.copy(q);
-            this.moonShadow.scale.setScalar(r_disk);
-            this.moonShadow.visible = true;
+            // إخفاء دائرة الظل الصغيرة (لأننا نستخدم تخفيف الإضاءة بدلاً من ذلك)
+            this.moonShadow.visible = false;
 
             // indicator near moon
             this.indicator.material.map = this.makeIndicatorTexture('LUNAR ECLIPSE');

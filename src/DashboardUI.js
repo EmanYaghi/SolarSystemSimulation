@@ -212,6 +212,7 @@ export default class DashboardUI {
         <div>Total E: ${(stats.E).toExponential(3)} J</div>
         <div>|P|: ${(stats.Pmag).toExponential(3)} kg·m/s</div>
         <div>Sun mass: ${this.app ? this.app.SunMassDisplay : 'n/a'}</div>
+                <div>v_COM: ${stats.v_com.toExponential(3)} m/s</div>
       `;
         } else {
             statsEl.innerHTML = `<div>System stats unavailable</div>`;

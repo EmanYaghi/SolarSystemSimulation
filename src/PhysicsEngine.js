@@ -76,8 +76,11 @@ export default class PhysicsEngine {
     computeSystemEnergyAndMomentum(softening = 1e6, includeOnly = true) {
         let K = 0;
         let Px = 0, Py = 0, Pz = 0;
+        let Mtot = 0;
+
         for (let b of this.bodies) {
             if (includeOnly && !b.included) continue;
+            Mtot += b.mass;
             K += 0.5 * b.mass * b.velocity_m.lengthSq();
             const p = b.velocity_m.clone().multiplyScalar(b.mass);
             Px += p.x; Py += p.y; Pz += p.z;
@@ -96,8 +99,12 @@ export default class PhysicsEngine {
                 U += -G * bi.mass * bj.mass / safeR;
             }
         }
-        const Pmag = Math.sqrt(Px * Px + Py * Py + Pz * Pz);
-        return { K, U, E: K + U, Pmag, Pvec: new THREE.Vector3(Px, Py, Pz) };
+
+        const Pvec = new THREE.Vector3(Px, Py, Pz);
+        const Pmag = Pvec.length();
+        const v_com = (Mtot > 0) ? Pmag / Mtot : 0;
+
+        return { K, U, E: K + U, Pmag, Pvec, Mtot, v_com };
     }
 
     // dtSim: simulated seconds (not real delta). params contains { pause, maxSubstepSeconds, softening, nBody, ...}
